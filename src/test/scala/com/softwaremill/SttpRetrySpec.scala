@@ -15,7 +15,7 @@ import org.scalatest.time.SpanSugar.convertIntToGrainOfTime
 import org.scalatest.{Assertion, BeforeAndAfterAll}
 import sttp.client3.armeria.cats.ArmeriaCatsBackend
 import sttp.client3.httpclient.fs2.HttpClientFs2Backend
-import sttp.client3.{SttpBackend, SttpBackendOptions, UriContext}
+import sttp.client3.{Response, SttpBackend, SttpBackendOptions, UriContext}
 import sttp.model.StatusCode
 
 import scala.concurrent.duration.FiniteDuration
@@ -23,7 +23,7 @@ import scala.concurrent.duration.FiniteDuration
 
 class SttpRetrySpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with BeforeAndAfterAll {
 
-  val port = 1080
+  val port = 8080
   val host = "localhost"
   var mockServer: ClientAndServer = null
 
@@ -38,26 +38,26 @@ class SttpRetrySpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with Be
     super.afterAll()
   }
 
-  def newBackend2(): SttpBackend[IO, Any] =
-    ArmeriaCatsBackend[IO](SttpBackendOptions.Default.copy(connectionTimeout = 15.seconds))
+  def newBackend(): SttpBackend[IO, Any] =
+    ArmeriaCatsBackend.usingDefaultClient()
 
-  def newBackend(): SttpBackend[IO, Any] = // Switch newBackend2 to newBackend and check how Armeria client behaves in this case
+  def newBackend2(): SttpBackend[IO, Any] = // Switch newBackend2 to newBackend and check how Armeria client behaves in this case
     HttpClientFs2Backend
-      .resource[IO](SttpBackendOptions.Default.copy(connectionTimeout = 15.seconds))
+      .resource[IO]()
       .allocated
       .unsafeRunSync()(IORuntime.global)
       ._1
 
   implicit class RetryTask[A](task: IO[A]) {
     def retry(
-               delay: FiniteDuration = 10.millis,
+               delay: FiniteDuration = 100.millis,
                retriesLeft: Int = 5
              ): IO[A] =
       task
         .onError(e => IO.delay(println(s"Received error: $e, retries left = $retriesLeft")))
         .handleErrorWith { error =>
         if (retriesLeft == 3)
-          setRespondWithCode(200) >> retry(delay, retriesLeft - 1)
+            retry(delay, retriesLeft - 1)
         else if (retriesLeft > 0)
           IO.sleep(delay) *> retry(delay, retriesLeft - 1)
         else
@@ -65,28 +65,32 @@ class SttpRetrySpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with Be
       }
   }
 
-  def setRespondWithCode(code: Int): IO[Unit] = {
-    IO.delay(new MockServerClient(host, port)
-      .when(
-        request()
-          .withPath("/api-test")
-          .withMethod("GET"),
-        Times.once()
-      )
-      .respond(
-        response()
-          .withStatusCode(code)
-      )
-    )
+  def setRespondWithCode(code: Int, howManyTimes: Int ): Unit = {
+      new MockServerClient(host, port)
+        .when(
+          request()
+            .withPath("/api-test")
+            .withMethod("GET"),
+          Times.exactly(howManyTimes)
+        )
+        .respond(
+          response()
+            .withStatusCode(code)
+        )
   }
+
 
   it should "call the HTTP server twice" in {
     // given
+    setRespondWithCode(401, howManyTimes = 2)
+    setRespondWithCode(400, howManyTimes = 1)
+    setRespondWithCode(200, howManyTimes = 1)
     implicit val sttpBackend = newBackend()
 
     // when
-    val result = sttp.client3.basicRequest
-      .get(uri"http://localhost:$port/api-test")
+    val result: IO[Response[Either[String, String]]] =
+      sttp.client3.basicRequest
+      .get(uri"http://$host:$port/api-test")
       .send()
 
     // then
@@ -94,6 +98,7 @@ class SttpRetrySpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with Be
       response =>
         response.code shouldBe StatusCode.Ok
     }
-    setRespondWithCode(401) >> check.retry()
+
+    check.retry()
   }
 }
