@@ -56,9 +56,7 @@ class SttpRetrySpec extends AsyncFlatSpec with AsyncIOSpec with Matchers with Be
       task
         .onError(e => IO.delay(println(s"Received error: $e, retries left = $retriesLeft")))
         .handleErrorWith { error =>
-        if (retriesLeft == 3)
-            retry(delay, retriesLeft - 1)
-        else if (retriesLeft > 0)
+        if (retriesLeft > 0)
           IO.sleep(delay) *> retry(delay, retriesLeft - 1)
         else
           IO.raiseError[A](error)
